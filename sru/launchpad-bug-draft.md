@@ -1,7 +1,10 @@
 # Launchpad bug draft (SRU template)
 
-File against: `edk2` (Ubuntu) → task for **resolute** (26.04). Noble (2024.02)
-and jammy (2022.02) predate the regression; plucky/questing are EOL.
+**FILED as LP: #2173906 — https://bugs.launchpad.net/bugs/2173906**
+(tasks: edk2 (Ubuntu), edk2 (Ubuntu Resolute); content below as filed)
+
+Affected supported release: **resolute** (26.04). Noble (2024.02) and jammy
+(2022.02) predate the regression; plucky/questing are EOL.
 
 ---
 

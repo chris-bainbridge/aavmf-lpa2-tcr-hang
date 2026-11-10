@@ -17,14 +17,11 @@ interim upstream commit 2eed2bf8f007, intentionally not included).
       (avoids touching someone's in-flight SRU). If urgency demands, ask
       Hector whether to fold it into 7.4 before migration instead.
 
-## 1. File the Launchpad bug
+## 1. File the Launchpad bug — DONE
 
-- File against source package `edk2`, resolute task, using
-  `launchpad-bug-draft.md` (fill in the LP bug number where the changelog
-  says `LP: #XXXXXXX`).
-- Tag: `arm64`, `aa-done`/`block-proposal` as appropriate; link
-  https://github.com/tianocore/edk2/issues/11962 and
-  https://bugs.debian.org/1124749.
+- Filed as **LP: #2173906** (https://bugs.launchpad.net/bugs/2173906) on
+  2026-11-10, tasks: edk2 (Ubuntu) + edk2 (Ubuntu Resolute), tag `arm64`.
+- Description = `launchpad-bug-draft.md` (SRU template).
 
 ## 2. Prepare the upload
 
@@ -36,8 +33,7 @@ cp <repo>/sru/ArmVirtPkg-ArmPlatformLibQemu-Support-early-ID-map-on-LPA2.patch \
 echo ArmVirtPkg-ArmPlatformLibQemu-Support-early-ID-map-on-LPA2.patch \
      >> debian/patches/series
 # merge the entry from <repo>/sru/changelog-entry.txt into debian/changelog
-# (dch will normalise the timestamp), replacing LP: #XXXXXXX with the real
-# bug number
+# (LP: #2173906 already filled in; dch will normalise the timestamp)
 ```
 
 Sanity checks before building:

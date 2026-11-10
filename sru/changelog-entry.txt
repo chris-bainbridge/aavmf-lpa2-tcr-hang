@@ -6,7 +6,7 @@ edk2 (2025.11-3ubuntu7.5) resolute; urgency=medium
     ArmConfigureMmu() reprogrammed TCR_EL1 to 52-bit/LPA2 while the MMU was
     still enabled on the early ID map's 48-bit page tables, so the next
     instruction fetch (XIP from flash) faulted forever in a prefetch-abort
-    storm (LP: #XXXXXXX).
+    storm (LP: #2173906).
     Cherry-picked from upstream edk2 commit b8df7d9c8e1e370b862890ebda677278
     c4c6155f ("ArmVirtPkg/ArmPlatformLibQemu: Support early ID map on LPA2
     capable CPUs", PR #12545), first shipped in edk2-stable202605. The rebase
