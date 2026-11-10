@@ -1,7 +1,12 @@
 # Prepared QEMU issue text (draft)
 
-> Status: NOT YET FILED — needs a valid gitlab.com token (glab config token expired)
-> Target: https://gitlab.com/qemu-project/qemu/-/issues/new
+> Decision (2026-11-10): **not filed, deliberately.** The root cause is in edk2
+> (tianocore/edk2#11962, fixed by PR #12545 in edk2-stable202605), not in QEMU —
+> `-cpu max` behaves per spec. A QEMU issue would be closed as NOT-A-BUG /
+> TRACKED-ELSEWHERE, so we chose not to create triage noise. This draft is kept
+> only for reference; the canonical record is edk2#11962 plus the verification
+> comment: https://github.com/tianocore/edk2/issues/11962#issuecomment-6771893806
+> (The older QEMU issue #1177 covers a different root cause from 2022.)
 
 ---
 
