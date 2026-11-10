@@ -1,0 +1,112 @@
+Evidence excerpts captured on 2026-11-10, host = Ubuntu 26.04, QEMU 10.2.1,
+guest firmware = /usr/share/AAVMF/AAVMF_CODE.no-secboot.fd
+(edk2 2025.11-3ubuntu7.3, arm64).
+
+=== 1. CPU-model matrix (25 s timeout, -M virt,gic-version=3, TCG, -smp 2) ===
+
+cortex-a78ae => 0 bytes, tail:                      (hangs before banner)
+max => 77 bytes, tail: ...11-3ubuntu7.3 built at 15:40:26 on Sep 23 2026)
+neoverse-n2 => 174 bytes, tail: >>Start PXE over IPv4.
+cortex-a72 => 254 bytes, tail: e: Press any key to enter the Boot Manager Menu.
+cortex-a76 => 254 bytes, tail: e: Press any key to enter the Boot Manager Menu.
+cortex-a57 => 254 bytes, tail: e: Press any key to enter the Boot Manager Menu.
+cortex-a710 => 254 bytes, tail: e: Press any key to enter the Boot Manager Menu.
+neoverse-n1 => 254 bytes, tail: e: Press any key to enter the Boot Manager Menu.
+neoverse-v1 => 174 bytes, tail: >>Start PXE over IPv4.
+a64fx => 254 bytes, tail: e: Press any key to enter the Boot Manager Menu.
+
+=> only `max` and `cortex-a78ae` (the 52-bit PARange models) hang.
+
+=== 2. Exception storm (`-d int`), first exception and steady state ===
+
+Taking exception 3 [Prefetch Abort] on CPU 0
+...from EL1 to EL1
+...with ESR 0x21/0x86000006        ; EC=0x21 IABF current-EL, IFSC=0b00110 => TF level 2
+...with FAR 0x18eac
+...with SPSR 0x800003c5
+...with ELR 0x18eac
+...to EL1 PC 0x5200 PSTATE 0x23c5
+
+(all subsequent exceptions: FAR=ELR=0x5200 — the vector fetch itself faults;
+ 3,262,883 exceptions in a 20 s run)
+
+=== 3. Last executed instructions before the storm (`-d in_asm,int`) ===
+
+IN:
+0x00018e90:
+OBJD-T: 414238d53f2000f10c000054     ; mrs x1, CurrentEL; cmp x1, #0x8; b.ne
+IN:
+0x00018e9c:
+OBJD-T: a0000054                     ; b.eq ...
+IN:
+0x00018ea0:
+OBJD-T: 410000b5                     ; cbnz x1, ...
+IN:
+0x00018ea8:
+OBJD-T: 402018d5                     ; msr TCR_EL1, x0   (0xd5182040)
+Taking exception 3 [Prefetch Abort] on CPU 0
+...with FAR 0x18eac ...              ; the fetch of 0x18eac faults immediately
+
+0x18e90 = ArmSetTCR(); its only caller in the image is at 0x18530,
+inside ArmConfigureMmu() (the TCR.IPS ladder code is visible at 0x184f0-0x18760).
+
+=== 4. The early ID map startup code (flash 0x59c0-0x5a70) ===
+
+59c0:  mrs  x0, CurrentEL
+59c4:  tbz  w0, #3, 0x59e4            ; EL1 -> early ID map
+59c8:  mrs  x0, ID_AA64MMFR1_EL1      ; (EL2 path: check VHE, set HCR.E2H)
+...
+59e4:  mov  x0, #0x44ffbb0000         ; MAIR (dev/NC/WT/WB)
+5a04:  mrs  x6, ID_AA64MMFR0_EL1
+5a08:  and  x6, x6, #0xf              ; PARange
+5a0c:  cmp  x6, #6
+5a10:  sub  x6, x6, #1
+5a14:  cinc x6, x6, ne                ; x6 = min(PARange, 5)  <-- 48-bit clamp
+5a18:  bfi  x1, x6, #32, #3           ; TCR.IPS
+...
+5a2c:  sub  x6, x7, x6, lsl #2        ; T0SZ = 32 - 4*IPS  (16 for 48-bit)
+5a38:  orr  x1, x1, x6                ; TCR.T0SZ (DS bit 59 stays 0)
+5a48:  msr  mair_el1, x0
+5a4c:  msr  tcr_el1, x1               ; early TCR: T0SZ=16, DS=0
+5a50:  msr  ttbr0_el1, x2             ; -> static 'idmap' tables in the FV
+5a58:  tlbi vmalle1
+...
+5a68:  msr  sctlr_el1, x3             ; MMU + caches ON
+
+(matches ArmPlatformPeiBootAction() in ArmPlatformLibQemu/ArmPlatformHelper.S
+ at edk2-stable202511)
+
+=== 5. ArmConfigureMmu's live TCR write is the sole trigger (binary patch) ===
+
+Patch flash offset 0x18ea8: 0xd5182040 (msr TCR_EL1, x0) -> 0xd503201f (nop):
+
+$ timeout 30 qemu-system-aarch64 ... -cpu max ... -drive if=pflash,...,file=patched.fd ...
+exit=124 serial bytes=174
+UEFI firmware (version 2025.11-3ubuntu7.3 built at 15:40:26 on Sep 23 2026)
+>>Start PXE over IPv4.
+
+=> guest boots to PXE under -cpu max once the live TCR write is removed.
+
+=== 6. Why the walk faults at level 2 with the old tables ===
+
+With T0SZ=12 + DS=1, the walk starts at level -1 (QEMU ptw.c computes
+level = 4 - (inputsize - 4)/stride = -1 for inputsize=52). The old root table
+('idmap', built for T0SZ=16/level-0 root) is then interpreted one level deeper:
+
+  L-1 idx = VA[51:48] = 0 -> idmap[0] = TABLE -> level-1 table '1:'
+  L0  idx = VA[47:39] = 0 -> '1:'[0]   = TABLE -> L2 table '20:'   (flash+dev)
+  L1  idx = VA[38:30] = 0 -> '20:'[0]  = TABLE -> L3 table '3:'    (first 2 MB)
+  L2  idx = VA[29:21] = 0 -> '3:'[0]   = 0x0  ("omit first 4k page", IdMap.S)
+
+  -> invalid descriptor -> Translation fault, level 2 (IFSC 0b00110) — exactly
+  the observed ESR. Same for the vector fetch at 0x5200 => infinite storm.
+
+=== 7. edk2 stable-tag check ===
+
+  edk2-stable202511: idmap_lpa2 absent   (affected — Ubuntu 26.04 firmware)
+  edk2-stable202602: idmap_lpa2 absent   (affected — Fedora 43 firmware)
+  edk2-stable202605: idmap_lpa2 present  (fixed)
+  edk2-stable202608: idmap_lpa2 present  (fixed)
+
+Fix: tianocore/edk2 PR #12545, commit b8df7d9c8e1e370b862890ebda677278c4c6155f
+("ArmVirtPkg/ArmPlatformLibQemu: Support early ID map on LPA2 capable CPUs").
