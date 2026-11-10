@@ -1,0 +1,156 @@
+From b8df7d9c8e1e370b862890ebda677278c4c6155f Mon Sep 17 00:00:00 2001
+From: Ard Biesheuvel <ardb@kernel.org>
+Date: Tue, 5 May 2026 13:50:19 +0200
+Subject: [PATCH] ArmVirtPkg/ArmPlatformLibQemu: Support early ID map on LPA2
+ capable CPUs
+
+ArmVirtQemu uses an initial early ID map in emulated NOR flash that is
+activated right out of reset, in order to avoid running a good chunk of
+the SEC and PEI stages with the MMU and caches disabled.
+
+This early ID map is currently not compatible with LPA2, and the
+associated startup code consciously omits 52-bit physical addressing, as
+it was not supported for 4k page sizes when this code was written.
+
+This means that by the time ArmConfigureMmu() runs, the TCR control
+register is already programmed with a value that reflects the non-LPA2
+nature of the active page tables. Given that the MMU is on at that
+point, TCR cannot simply be updated to a value that enables LPA2. Yet
+this is what happens currently, and so the boot hangs really early when
+running ArmVirtQemu on LPA2 capable CPUs.
+
+Disabling the MMU again at this point is problematic, because it would
+require cache maintenance on the stack and on other live RAM regions.
+
+Given that the early page tables are in read-only NOR flash, updating
+them on the fly to make them LPA2 compatible is impossible. So instead,
+provide a second set of early page tables, but using 5 levels of paging
+for LPA2, and omitting the shareability attributes in the page table
+descriptors, as LPA2 repurposes these bits as physical address bits.
+
+Also update the startup code to program TCR.IPS and TCR.DS
+accordingly, but only if LPA2 is supported and the PArange is 52 bits:
+this reflects the logic in ArmConfigureMmu(), ensuring that the TCR
+value it calculates is identical to the one chosen by the early code.
+
+Signed-off-by: Ard Biesheuvel <ardb@kernel.org>
+---
+ .../ArmPlatformLibQemu/ArmPlatformHelper.S    | 10 ++++-
+ ArmVirtPkg/Library/ArmPlatformLibQemu/IdMap.S | 42 +++++++++++--------
+ 2 files changed, 34 insertions(+), 18 deletions(-)
+
+diff --git a/ArmVirtPkg/Library/ArmPlatformLibQemu/ArmPlatformHelper.S b/ArmVirtPkg/Library/ArmPlatformLibQemu/ArmPlatformHelper.S
+index 55c01035bbc7..e0c720a16da6 100644
+--- a/ArmVirtPkg/Library/ArmPlatformLibQemu/ArmPlatformHelper.S
++++ b/ArmVirtPkg/Library/ArmPlatformLibQemu/ArmPlatformHelper.S
+@@ -43,6 +43,8 @@
+  .set    ID_AA64MMFR1_VH_MASK,  0xf << 8
+  .set    HCR_EL2_E2H,           0x1 << 34
+ 
++ .set    ID_AA64MMFR0_TG4_52,   0xf << 28
++ .set    TCR_DS,                0x1 << 59
+ 
+ ASM_FUNC(ArmPlatformPeiBootAction)
+ #ifdef CAVIUM_ERRATUM_27456
+@@ -75,15 +77,21 @@ ASM_FUNC(ArmPlatformPeiBootAction)
+   mov_i  x0, mairval
+   mov_i  x1, tcrval
+   adrp   x2, idmap
+-  orr    x2, x2, #0xff << 48     // set non-zero ASID
+   mov_i  x3, sctlrval
+ 
+   mrs    x6, id_aa64mmfr0_el1    // get the supported PA range
++  and    x4, x6, #ID_AA64MMFR0_TG4_52 // check for LPA2 support
+   and    x6, x6, #0xf            // isolate PArange bits
+   cmp    x6, #6                  // 0b0110 == 52 bits
++  csel   x4, x4, xzr, eq         // ignore LPA2 capability unless PArange == 52
++  ccmp   x4, xzr, #0, eq         // permit PS == 52 bits iff LPA2 is supported
+   sub    x6, x6, #1              // subtract 1
+   cinc   x6, x6, ne              // add back 1 unless PArange == 52 bits
+   bfi    x1, x6, #32, #3         // copy updated PArange into TCR_EL1.IPS
++  cbz    x4, 1f
++  orr    x1, x1, #TCR_DS
++  adrp   x2, idmap_lpa2          // switch to LPA2 idmap
++1:orr    x2, x2, #0xff << 48     // set non-zero ASID
+ 
+   cmp    x6, #3                  // 0b0011 == 42 bits
+   sub    x6, x6, #1              // subtract 1
+diff --git a/ArmVirtPkg/Library/ArmPlatformLibQemu/IdMap.S b/ArmVirtPkg/Library/ArmPlatformLibQemu/IdMap.S
+index d9dcaae2bf7f..3c23957eb82b 100644
+--- a/ArmVirtPkg/Library/ArmPlatformLibQemu/IdMap.S
++++ b/ArmVirtPkg/Library/ArmPlatformLibQemu/IdMap.S
+@@ -13,49 +13,57 @@
+ 
+   .set      TT_MT_DEV, 0x0 << 2                 // MAIR #0
+   .set      TT_MT_MEM, (0x3 << 2) | (0x3 << 8)  // MAIR #3
++  .set      TT_MT_MEM_LPA2, (0x3 << 2)          // MAIR #3
+ 
+-  .set      PAGE_XIP,  TT_TYPE_PAGE  | TT_MT_MEM | TT_AF | TT_RO | TT_NG
+-  .set      BLOCK_XIP, TT_TYPE_BLOCK | TT_MT_MEM | TT_AF | TT_RO | TT_NG
+-  .set      BLOCK_DEV, TT_TYPE_BLOCK | TT_MT_DEV | TT_AF | TT_XN | TT_NG
+-  .set      BLOCK_MEM, TT_TYPE_BLOCK | TT_MT_MEM | TT_AF | TT_XN | TT_NG
++  .set      PAGE_XIP,  TT_TYPE_PAGE  | TT_AF | TT_RO | TT_NG
++  .set      BLOCK_XIP, TT_TYPE_BLOCK | TT_AF | TT_RO | TT_NG
++  .set      BLOCK_DEV, TT_TYPE_BLOCK | TT_AF | TT_XN | TT_NG
++  .set      BLOCK_MEM, TT_TYPE_BLOCK | TT_AF | TT_XN | TT_NG
+ 
+-  .globl    idmap
+   .section  ".rodata.idmap", "a", %progbits
+   .align    12
+ 
+-idmap:      /* level 0 */
++   .macro   make_idmap, name, root_levels, mt
++  .globl    \name
++\name:
++  .rept     \root_levels
+   .quad     1f + TT_TYPE_TABLE
+   .fill     511, 8, 0x0
++1:
++  .endr
+ 
+-1:          /* level 1 */
+-  .quad     20f + TT_TYPE_TABLE           // 1 GB of flash and device mappings
+-  .quad     21f + TT_TYPE_TABLE           // up to 1 GB of DRAM
+-  .fill     510, 8, 0x0                   // 510 GB of remaining VA space
++  .quad     20f + TT_TYPE_TABLE                 // 1 GB of flash and device mappings
++  .quad     21f + TT_TYPE_TABLE                 // up to 1 GB of DRAM
++  .fill     510, 8, 0x0                         // 510 GB of remaining VA space
+ 
+ 20:         /* level 2 */
+-  .quad     3f + TT_TYPE_TABLE            // up to 2 MB of flash
+-  .quad     BLOCK_XIP | (0x1  << 21)      // another 2 MB of flash
+-  .fill     62, 8, 0x0                    // 124 MB of unused flash
++  .quad     3f + TT_TYPE_TABLE                  // up to 2 MB of flash
++  .quad     BLOCK_XIP | \mt | (0x1  << 21)      // another 2 MB of flash
++  .fill     62, 8, 0x0                          // 124 MB of unused flash
+   .set      idx, 64
+   .rept     448
+-  .quad     BLOCK_DEV | (idx << 21)       // 896 MB of RW- device mappings
++  .quad     BLOCK_DEV | TT_MT_DEV | (idx << 21) // 896 MB of RW- device mappings
+   .set      idx, idx + 1
+   .endr
+ 
+ 21:         /* level 2 */
+   .set      idx, 0x40000000 >> 21
+   .rept     64
+-  .quad     BLOCK_MEM | (idx << 21)       // 128 MB of RW- memory mappings
++  .quad     BLOCK_MEM | \mt | (idx << 21)       // 128 MB of RW- memory mappings
+   .set      idx, idx + 1
+   .endr
+   .fill     448, 8, 0x0
+ 
+ 3:          /* level 3 */
+-  .quad     0x0                           // omit first 4k page
++  .quad     0x0                                 // omit first 4k page
+   .set      idx, 1
+   .rept     511
+-  .quad     PAGE_XIP | (idx << 12)        // 2044 KiB of R-X flash mappings
++  .quad     PAGE_XIP | \mt | (idx << 12)        // 2044 KiB of R-X flash mappings
+   .set      idx, idx + 1
+   .endr
++  .endm
++
++  make_idmap  idmap,      root_levels=1, mt=TT_MT_MEM
++  make_idmap  idmap_lpa2, root_levels=2, mt=TT_MT_MEM_LPA2
+ 
+ AARCH64_BTI_NOTE()
